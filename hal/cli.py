@@ -1,37 +1,29 @@
+import asyncio
+import importlib
 import os
 import re
+import sys
+import time
+import traceback
+from datetime import datetime
+from inspect import get_annotations
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 import click
 import yaml
-import asyncio
-from typing import Any, Dict, Optional
-import time
-import importlib
-from inspect import get_annotations
+from dotenv import load_dotenv
+from rich import print
+from rich.box import ROUNDED
+from rich.table import Table
+
 from .agent_runner import AgentRunner
 from .inspect.inspect import is_inspect_benchmark
 from .inspect_runner import inspect_evaluate
-from dotenv import load_dotenv
-import sys
-from .utils.logging_utils import (
-    setup_logging, 
-    print_header, 
-    print_step, 
-    print_success, 
-    print_error,
-    print_results_table,
-    print_run_summary,
-    print_warning,
-    terminal_print,
-    console,
-    print_run_config
-)
-from rich.table import Table
-from rich import print
-from rich.box import ROUNDED
-import traceback
-from datetime import datetime
-from pathlib import Path
-import sys
+from .utils.logging_utils import (console, print_error, print_header,
+                                  print_results_table, print_run_config,
+                                  print_run_summary, print_step, print_success,
+                                  print_warning, setup_logging, terminal_print)
 
 load_dotenv()
 
@@ -81,6 +73,12 @@ load_dotenv()
     type=str,
     help="One or more args to pass to inspect eval (e.g. -I token_limit=1000 -I model_args='{'temperature': 0.5}'"
 )
+@click.option("--crash-test", is_flag=True, help="Enable crash-test mode with network failure simulation")
+@click.option("--failure-rate", type=float, help="Network failure rate (0.0-1.0). Required when using --crash-test")
+@click.option("--error-mode", type=str, help="Type of network failure to simulate. Required when using --crash-test")
+@click.option("--allowed-domains", type=str, help="Comma-separated list of domains to exclude from failures")
+@click.option("--noisy-mode", type=click.Choice(['dns', 'connect', 'both']), default='both', help="Which operations to affect (dns/connect/both)")
+@click.option("--crash-test-debug", is_flag=True, help="Enable debug logging for crash-test mode")
 def main(
     config,
     benchmark,
@@ -99,6 +97,12 @@ def main(
     vm,
     docker,
     max_tasks,
+    crash_test,
+    failure_rate,
+    error_mode,
+    allowed_domains,
+    noisy_mode,
+    crash_test_debug,
     **kwargs,
 ):
     """Run agent evaluation on specified benchmark with given model."""
@@ -142,6 +146,31 @@ def main(
         if sum([bool(conda_env_name), vm, docker]) > 1:
             print_error("Only one of --conda_env_name, --vm, or --docker can be specified. Exiting...")
             sys.exit(1)
+        
+        # Validate crash-test options
+        if crash_test:
+            if not docker:
+                print_error("--crash-test requires --docker to be specified. Exiting...")
+                sys.exit(1)
+            
+            if failure_rate is None or error_mode is None:
+                print_error("--crash-test requires --failure-rate and --error-mode to be specified. Exiting...")
+                sys.exit(1)
+            
+            if not (0.0 <= failure_rate <= 1.0):
+                print_error("--failure-rate must be between 0.0 and 1.0. Exiting...")
+                sys.exit(1)
+            
+            # Validate error mode
+            valid_error_modes = [
+                "4xx_errors", "5xx_errors", "weird_codes", "page_not_found",
+                "maintenance_mode", "rate_limited", "dns_failure", "connection_refused",
+                "timeout", "weird_redirects", "garbage_response", "truncated_response",
+                "malformed_headers"
+            ]
+            if error_mode not in valid_error_modes:
+                print_error(f"Invalid --error-mode: {error_mode}. Valid modes: {', '.join(valid_error_modes)}. Exiting...")
+                sys.exit(1)
                 
         # Check if VM/Docker execution is attempted with inspect solver
         if (vm or docker) and is_inspect_benchmark(benchmark):
@@ -241,6 +270,18 @@ def main(
             # Initialize agent runner
             print_step("Initializing agent runner...")
             try:
+                # Prepare crash-test configuration
+                crash_test_config = None
+                if crash_test:
+                    crash_test_config = {
+                        "failure_rate": failure_rate,
+                        "error_mode": error_mode,
+                        "noisy_mode": noisy_mode,
+                        "debug": crash_test_debug
+                    }
+                    if allowed_domains:
+                        crash_test_config["allowed_domains"] = [d.strip() for d in allowed_domains.split(",")]
+                
                 runner = AgentRunner(
                     agent_function=agent_function,
                     agent_dir=agent_dir,
@@ -255,7 +296,9 @@ def main(
                     continue_run=continue_run,
                     run_command=run_command,
                     ignore_errors=ignore_errors,
-                    max_tasks=max_tasks
+                    max_tasks=max_tasks,
+                    crash_test=crash_test,
+                    crash_test_config=crash_test_config
                 )
 
                 # Run evaluation
@@ -359,7 +402,7 @@ def is_inspect_solver(agent_function: str, agent_dir: str) -> bool:
 def validate_model_pricing(model_name: str) -> None:
     """Validate that model pricing information exists"""
     from .utils.weave_utils import MODEL_PRICES_DICT
-    
+
     # together_ai is not part of weave model name
     model_name = model_name.replace("together_ai/", "")
     

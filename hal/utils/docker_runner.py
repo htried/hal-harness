@@ -1,28 +1,32 @@
-import os
-import json
 import asyncio
-import shutil
-import uuid
-import tempfile
-import subprocess
+import json
 import logging
-import docker
+import os
+import shutil
+import tempfile
 import time
-from typing import Dict, Any, Optional, List
+import uuid
 from pathlib import Path
-from ..benchmarks.base_benchmark import BaseBenchmark
-from rich.progress import Progress, TaskID
+from typing import Any, Dict, List, Optional
+
+import docker
 from dotenv import dotenv_values
+from rich.progress import Progress, TaskID
+
+from ..benchmarks.base_benchmark import BaseBenchmark
+
 # Get logger for verbose output
 verbose_logger = logging.getLogger('agent_eval.verbose')
 
-# Define the docker image name
+# Define the docker image names
 DOCKER_IMAGE_NAME = "hal-agent-runner:latest"
+CRASH_TEST_IMAGE_NAME = "crash-test-hal:latest"
 
 class DockerRunner:
     """Handles running agents in Docker containers for isolation"""
     
-    def __init__(self, log_dir: str, max_concurrent: int = 1, benchmark: Optional[BaseBenchmark] = None):
+    def __init__(self, log_dir: str, max_concurrent: int = 1, benchmark: Optional[BaseBenchmark] = None, 
+                 crash_test: bool = False, crash_test_config: Optional[Dict[str, Any]] = None):
         self.log_dir = log_dir
         self.max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -30,6 +34,8 @@ class DockerRunner:
         self._active_containers: List[str] = []
         self.benchmark = benchmark
         self.verbose = False
+        self.crash_test = crash_test
+        self.crash_test_config = crash_test_config or {}
         
         # Initialize Docker client
         self.docker_client = docker.from_env()
@@ -53,34 +59,43 @@ class DockerRunner:
     def _ensure_docker_image(self) -> None:
         """Ensure the Docker image exists, building it if necessary"""
         try:
+            # Choose the appropriate image based on crash_test mode
+            image_name = CRASH_TEST_IMAGE_NAME if self.crash_test else DOCKER_IMAGE_NAME
+            
             # Check if the image already exists
             try:
-                self.docker_client.images.get(DOCKER_IMAGE_NAME)
-                verbose_logger.debug(f"Docker image {DOCKER_IMAGE_NAME} already exists")
+                self.docker_client.images.get(image_name)
+                verbose_logger.debug(f"Docker image {image_name} already exists")
             except docker.errors.ImageNotFound:
-                verbose_logger.debug(f"Docker image {DOCKER_IMAGE_NAME} not found, building it...")
-                
-                # Get the Dockerfile path - it should be in the same directory as this file
-                dockerfile_dir = os.path.join(os.path.dirname(__file__), "docker")
-                dockerfile_path = os.path.join(dockerfile_dir, "Dockerfile")
-                
-                if not os.path.exists(dockerfile_path):
-                    raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
-                
-                # Build the Docker image
-                verbose_logger.debug(f"Building Docker image from {dockerfile_path}")
-                
-                _, build_logs = self.docker_client.images.build(
-                    path=dockerfile_dir,
-                    dockerfile=os.path.basename(dockerfile_path),
-                    tag=DOCKER_IMAGE_NAME
-                )
-                
-                for log in build_logs:
-                    if 'stream' in log:
-                        verbose_logger.debug(log['stream'].strip())
-                
-                verbose_logger.debug(f"Docker image built successfully")
+                if self.crash_test:
+                    # For crash-test mode, the image should be built externally
+                    error_message = f"Crash-test image {image_name} not found. Please build it first using the build script in the crash-test-hal directory."
+                    verbose_logger.debug(error_message)
+                    raise RuntimeError(error_message)
+                else:
+                    verbose_logger.debug(f"Docker image {image_name} not found, building it...")
+                    
+                    # Get the Dockerfile path - it should be in the same directory as this file
+                    dockerfile_dir = os.path.join(os.path.dirname(__file__), "docker")
+                    dockerfile_path = os.path.join(dockerfile_dir, "Dockerfile")
+                    
+                    if not os.path.exists(dockerfile_path):
+                        raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
+                    
+                    # Build the Docker image
+                    verbose_logger.debug(f"Building Docker image from {dockerfile_path}")
+                    
+                    _, build_logs = self.docker_client.images.build(
+                        path=dockerfile_dir,
+                        dockerfile=os.path.basename(dockerfile_path),
+                        tag=image_name
+                    )
+                    
+                    for log in build_logs:
+                        if 'stream' in log:
+                            verbose_logger.debug(log['stream'].strip())
+                    
+                    verbose_logger.debug(f"Docker image built successfully")
                 
         except docker.errors.DockerException as e:
             error_message = f"Failed to build Docker image: {str(e)}"
@@ -231,9 +246,12 @@ class DockerRunner:
             with open(script_path, "w") as f:
                 f.write(script)
             
+            # Choose the appropriate image based on crash_test mode
+            image_name = CRASH_TEST_IMAGE_NAME if self.crash_test else DOCKER_IMAGE_NAME
+            
             # create container from image and mount temp dir
             container = self.docker_client.containers.run(
-                image=DOCKER_IMAGE_NAME,
+                image=image_name,
                 name=container_id,
                 detach=True,
                 command=["tail", "-f", "/dev/null"],  # Keep container running
@@ -290,6 +308,34 @@ class DockerRunner:
             # Get current environment variables
             env_vars = os.environ.copy()
             
+            # Add crash-test environment variables if in crash-test mode
+            if self.crash_test:
+                env_vars.update({
+                    "NETWORK_FAILURE_RATE": str(self.crash_test_config.get("failure_rate", "0.5")),
+                    "NOISY_ERROR_MODE": str(self.crash_test_config.get("error_mode", "4xx_errors")),
+                    "NOISY_MODE": str(self.crash_test_config.get("noisy_mode", "both")),
+                })
+                
+                # Add allowed domains if specified
+                if "allowed_domains" in self.crash_test_config:
+                    env_vars["ALLOWED_DOMAINS"] = ",".join(self.crash_test_config["allowed_domains"])
+                else:
+                    # Use default allowed domains (AI API providers)
+                    default_allowed = [
+                        "api.openai.com",
+                        "api.anthropic.com", 
+                        "generativelanguage.googleapis.com",
+                        "bedrock-runtime.us-east-1.amazonaws.com",
+                        "api.groq.com",
+                        "api.deepseek.com",
+                        "api.x.ai"
+                    ]
+                    env_vars["ALLOWED_DOMAINS"] = ",".join(default_allowed)
+                
+                # Add debug flag if specified
+                if self.crash_test_config.get("debug", False):
+                    env_vars["NOISY_DEBUG"] = "1"
+            
             # run setup script if it exists
             if self.benchmark and self.benchmark.setup_script:
                 print(f"Running setup script: {self.benchmark.setup_script}")
@@ -337,8 +383,9 @@ class DockerRunner:
             # Run the script and capture output with timeout handling
             start_time = time.time() 
         
-            # get env vars from .env file
-            env_vars = dotenv_values(".env")
+            # get env vars from .env file and merge with crash-test vars
+            dotenv_vars = dotenv_values(".env")
+            env_vars.update(dotenv_vars)
             env_vars_str = " ".join([f"{k}={v}" for k, v in env_vars.items()])
             print(f"Running script with env: {env_vars_str}")
             

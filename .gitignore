@@ -11,6 +11,7 @@ hal/scratch.ipynb
 agents/Agentless
 agents/SWE-agent
 agents/Moatless/ingest.ipynb
+agents/
 scratch.py
 scratch.ipynb
 write_swebench_upload_file.py
@@ -25,6 +26,7 @@ hal/benchmarks/corebench/capsules/*
 hal/benchmarks/corebench/core_test.json
 agents/appworld_example_agent/data/*
 hal/benchmarks/scienceagentbench/benchmark
+hal/benchmarks
 experiments/*
 archive/*
 agents/USACO/data/.DS_Store

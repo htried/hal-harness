@@ -1,18 +1,23 @@
-import os
 import json
-import weave
-import time
-from typing import Dict, Any, Optional
-from .benchmark_manager import BenchmarkManager
-from .utils.local_runner import LocalRunner
-from .utils.docker_runner import DockerRunner
-from .utils.logging_utils import print_step, print_success, print_error, create_progress, console, log_warning, print_warning
+import os
 import sys
-from rich.table import Table
+import time
+from typing import Any, Dict, Optional
+
+import weave
 from rich.box import ROUNDED
-from .utils.logging_utils import terminal_print
+from rich.table import Table
+
+from .benchmark_manager import BenchmarkManager
 from .inspect.inspect import is_inspect_benchmark
-from .utils.weave_utils import get_call_ids, delete_calls
+from .utils.docker_runner import DockerRunner
+from .utils.local_runner import LocalRunner
+from .utils.logging_utils import (console, create_progress, log_warning,
+                                  print_error, print_step, print_success,
+                                  print_warning, terminal_print)
+from .utils.weave_utils import delete_calls, get_call_ids
+
+
 class AgentRunner:
     """Handles running agents either locally or on VMs"""
 
@@ -30,7 +35,9 @@ class AgentRunner:
                  continue_run: bool = False,
                  run_command: str = None,
                  ignore_errors: bool = False,
-                 max_tasks: Optional[int] = None):
+                 max_tasks: Optional[int] = None,
+                 crash_test: bool = False,
+                 crash_test_config: Optional[Dict[str, Any]] = None):
         
         # Validate agent_function format
         if not isinstance(agent_function, str) or '.' not in agent_function:
@@ -89,7 +96,9 @@ class AgentRunner:
             self.runner = DockerRunner(
                 max_concurrent=max_concurrent,
                 log_dir=self.benchmark.get_run_dir(self.run_id),
-                benchmark=self.benchmark
+                benchmark=self.benchmark,
+                crash_test=crash_test,
+                crash_test_config=crash_test_config
             )
         else:
             self.runner = LocalRunner(
