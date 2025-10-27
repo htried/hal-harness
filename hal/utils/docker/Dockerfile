@@ -7,6 +7,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     wget \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Miniconda
@@ -22,7 +36,15 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 ENV PATH /opt/conda/bin:$PATH
 
 # Install weave and pin gql < 4
-RUN pip install weave==0.51.41 "gql<4"
+RUN pip install weave==0.51.41 "gql<4" "numpy<2"
+
+# Install appworld packages
+RUN pip install "git+https://github.com/stonybrooknlp/appworld.git"
+RUN pip install "git+https://github.com/stonybrooknlp/appworld.git@main#subdirectory=experiments"
+
+# Install playwright browsers
+RUN pip install playwright
+RUN playwright install chromium
 
 # Set working directory
 WORKDIR /workspace

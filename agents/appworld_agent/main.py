@@ -5,7 +5,6 @@ from appworld.common.path_store import path_store
 from appworld.common.utils import read_file, write_file
 from appworld.evaluator import evaluate_dataset
 
-
 current_directory = os.path.dirname(os.path.abspath(__file__))
 path_store.update_root(current_directory)
 
@@ -33,8 +32,9 @@ def run(input: dict[str, dict], **kwargs) -> dict[str, str]:
     )
     write_file(actual_experiment_config, actual_experiment_config_file_path)
     # run the experiment
+    # Call the CLI function with positional arguments as expected by typer
     cli.run(
-        experiment_name=actual_experiment_name,
+        actual_experiment_name,  # experiment_name as positional argument
         task_id=None,
         override=None,
         num_processes=1,

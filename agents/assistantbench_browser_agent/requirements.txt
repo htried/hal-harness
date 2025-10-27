@@ -1,4 +1,10 @@
 weave
 browser_use
-asynchio
+asyncio
+numpy==1.26.4
 langchain
+langchain-core
+langchain-openai
+langchain-anthropic
+langchain-google-genai
+langchain-together

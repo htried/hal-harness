@@ -79,6 +79,7 @@ load_dotenv()
 @click.option("--allowed-domains", type=str, help="Comma-separated list of domains to exclude from failures")
 @click.option("--noisy-mode", type=click.Choice(['dns', 'connect', 'both']), default='both', help="Which operations to affect (dns/connect/both)")
 @click.option("--crash-test-debug", is_flag=True, help="Enable debug logging for crash-test mode")
+@click.option("--docker-timeout", type=int, default=7200, help="Timeout in seconds for Docker-based tasks (default: 7200)")
 def main(
     config,
     benchmark,
@@ -103,6 +104,7 @@ def main(
     allowed_domains,
     noisy_mode,
     crash_test_debug,
+    docker_timeout,
     **kwargs,
 ):
     """Run agent evaluation on specified benchmark with given model."""
@@ -298,7 +300,8 @@ def main(
                     ignore_errors=ignore_errors,
                     max_tasks=max_tasks,
                     crash_test=crash_test,
-                    crash_test_config=crash_test_config
+                    crash_test_config=crash_test_config,
+                    docker_timeout=docker_timeout
                 )
 
                 # Run evaluation

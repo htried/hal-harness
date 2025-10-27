@@ -386,11 +386,34 @@ class DockerRunner:
             # get env vars from .env file and merge with crash-test vars
             dotenv_vars = dotenv_values(".env")
             env_vars.update(dotenv_vars)
-            env_vars_str = " ".join([f"{k}={v}" for k, v in env_vars.items()])
+
+            # Filter out problematic environment variables that cause issues in Docker
+            problematic_vars = [
+                'CONDA_PROMPT_MODIFIER', 'CONDA_SHLVL', 'CONDA_PREFIX_1', 
+                'VSCODE_GIT_ASKPASS_NODE', 'VSCODE_DEBUGPY_ADAPTER_ENDPOINTS', 
+                'BUNDLED_DEBUGPY_PATH', 'CONDA_EXE', 'CONDA_PYTHON_EXE', 
+                'CONDA_DEFAULT_ENV', 'CONDA_PREFIX',
+                # Filter out variables that point to host paths that don't exist in container
+                'TMPDIR', 'HOME', 'USER', 'LOGNAME',
+                # Filter out terminal and session variables
+                'TERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION',
+                # Filter out Cursor/VSCode specific variables
+                'CURSOR_TRACE_ID', 'VSCODE_GIT_IPC_HANDLE',
+                # Filter out local paths
+                'PWD', 'PATH', 'SHELL', 'NVM_DIR', 'NVM_INC', 'NVM_BIN',
+                'COMMAND_MODE', '__CF_USER_TEXT_ENCODING',
+                'TIKTOKEN_CACHE_DIR', 'PYDEVD_DISABLE_FILE_VALIDATION'
+            ]
+            filtered_env_vars = {k: v for k, v in env_vars.items() if k not in problematic_vars}
+
+            env_vars_str = " ".join([f"{k}={v}" for k, v in filtered_env_vars.items()])
             print(f"Running script with env: {env_vars_str}")
             
+            # Use full path to conda in Docker containers
+            conda_cmd = "/opt/conda/bin/conda"
+
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_vars_str} conda run -n agent_env python run_agent.py",
+                "docker", "exec", container_id, "bash", "-c", f"{env_vars_str} {conda_cmd} run -n agent_env python run_agent.py",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )

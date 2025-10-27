@@ -37,7 +37,8 @@ class AgentRunner:
                  ignore_errors: bool = False,
                  max_tasks: Optional[int] = None,
                  crash_test: bool = False,
-                 crash_test_config: Optional[Dict[str, Any]] = None):
+                 crash_test_config: Optional[Dict[str, Any]] = None,
+                 docker_timeout: int = 7200):
         
         # Validate agent_function format
         if not isinstance(agent_function, str) or '.' not in agent_function:
@@ -119,6 +120,7 @@ class AgentRunner:
         self.continue_run = continue_run
         self.ignore_errors = ignore_errors
         self.max_tasks = max_tasks
+        self.docker_timeout = docker_timeout
         
 
     def get_remaining_tasks(self, dataset: Dict[str, Any]) -> Dict[str, Any]:
