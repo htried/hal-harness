@@ -64,6 +64,7 @@ load_dotenv()
     help="Path to configuration file. (currently not used)",
 )
 @click.option("--vm", is_flag=True, help="Run the agent on azure VMs")
+@click.option("--google-cloud", is_flag=True, help="Run the agent on Google Cloud VMs")
 @click.option("--docker", is_flag=True, help="Run the agent in Docker containers for isolation. Requires Docker to be installed on the system. Resources are limited to 4GB memory and 2 CPU cores per container.")
 @click.option("--continue_run", is_flag=True, help="Continue from a previous run, only running failed or incomplete tasks. You must provide the same run_id to continue a run.")
 @click.option("--ignore_errors", is_flag=True, help="Ignore errors and continue running the remaining tasks. This is useful for continuing a run that failed due to an error.")
@@ -96,6 +97,7 @@ def main(
     b,
     i,
     vm,
+    google_cloud,
     docker,
     max_tasks,
     crash_test,
@@ -145,14 +147,14 @@ def main(
             validate_model_pricing(agent_args["model_name"])
         
         # Validate runner options
-        if sum([bool(conda_env_name), vm, docker]) > 1:
-            print_error("Only one of --conda_env_name, --vm, or --docker can be specified. Exiting...")
+        if sum([bool(conda_env_name), vm, google_cloud, docker]) > 1:
+            print_error("Only one of --conda_env_name, --vm, --google-cloud, or --docker can be specified. Exiting...")
             sys.exit(1)
         
         # Validate crash-test options
         if crash_test:
-            if not docker:
-                print_error("--crash-test requires --docker to be specified. Exiting...")
+            if not (docker or google_cloud):
+                print_error("--crash-test requires --docker or --google-cloud to be specified. Exiting...")
                 sys.exit(1)
             
             if failure_rate is None or error_mode is None:
@@ -292,6 +294,7 @@ def main(
                     config=config,
                     run_id=run_id,  # Now guaranteed to have a value
                     use_vm=vm,
+                    use_google_cloud=google_cloud,
                     use_docker=docker,
                     max_concurrent=max_concurrent,
                     conda_env=conda_env_name,

@@ -44,7 +44,7 @@ RUN pip install "git+https://github.com/stonybrooknlp/appworld.git@main#subdirec
 
 # Install playwright browsers
 RUN pip install playwright
-RUN playwright install chromium
+RUN playwright install --with-deps
 
 # Set working directory
 WORKDIR /workspace

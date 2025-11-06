@@ -29,6 +29,7 @@ class AgentRunner:
                  config: Dict[str, Any],
                  run_id: Optional[str] = None,
                  use_vm: bool = False,
+                 use_google_cloud: bool = False,
                  use_docker: bool = False,
                  max_concurrent: int = 1,
                  conda_env: Optional[str] = None,
@@ -50,12 +51,12 @@ class AgentRunner:
         
         # Check for requirements.txt
         requirements_path = os.path.join(agent_dir, 'requirements.txt')
-        if not os.path.exists(requirements_path) and not conda_env and not use_docker and not use_vm:
+        if not os.path.exists(requirements_path) and not conda_env and not use_docker and not use_vm and not use_google_cloud:
             raise ValueError(f"No requirements.txt found in agent directory: {agent_dir}")
         
         # Validate runner options
-        if sum([bool(conda_env), use_vm, use_docker]) > 1:
-            raise ValueError("Only one of conda_env, use_vm, or use_docker can be set at a time.")
+        if sum([bool(conda_env), use_vm, use_google_cloud, use_docker]) > 1:
+            raise ValueError("Only one of conda_env, use_vm, use_google_cloud, or use_docker can be set at a time.")
         
         # Initialize benchmark first
         self.benchmark_manager = BenchmarkManager(agent_dir, config)
@@ -78,8 +79,8 @@ class AgentRunner:
         self.run_command = run_command
                 
         # Check if benchmark requires sandbox
-        if self.benchmark.requires_sandbox and not use_vm and not use_docker:
-            raise ValueError(f"Benchmark {benchmark_name} requires sandbox execution. Please use --vm or --docker flag.")
+        if self.benchmark.requires_sandbox and not use_vm and not use_google_cloud and not use_docker:
+            raise ValueError(f"Benchmark {benchmark_name} requires sandbox execution. Please use --vm, --google-cloud, or --docker flag.")
         
         
         # Set run ID
@@ -89,6 +90,13 @@ class AgentRunner:
         if use_vm:
             from .utils.vm_runner import VMRunner
             self.runner = VMRunner(
+                max_concurrent=max_concurrent,
+                log_dir=self.benchmark.get_run_dir(self.run_id),
+                benchmark=self.benchmark
+            )
+        elif use_google_cloud:
+            from .utils.gcp_runner import GCPRunner
+            self.runner = GCPRunner(
                 max_concurrent=max_concurrent,
                 log_dir=self.benchmark.get_run_dir(self.run_id),
                 benchmark=self.benchmark
@@ -116,6 +124,7 @@ class AgentRunner:
         self.max_concurrent = max_concurrent
         self.conda_env = conda_env
         self.use_vm = use_vm
+        self.use_google_cloud = use_google_cloud
         self.use_docker = use_docker
         self.continue_run = continue_run
         self.ignore_errors = ignore_errors

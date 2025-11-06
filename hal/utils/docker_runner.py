@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import tempfile
 import time
@@ -249,12 +250,45 @@ class DockerRunner:
             # Choose the appropriate image based on crash_test mode
             image_name = CRASH_TEST_IMAGE_NAME if self.crash_test else DOCKER_IMAGE_NAME
             
+            # Prepare environment variables for crash-test mode
+            container_env = {}
+            if self.crash_test:
+                # Add LD_PRELOAD to load libnoisy in crash-test mode
+                container_env['LD_PRELOAD'] = '/utils/libnoisy.so'
+                # Also add the crash-test configuration variables
+                container_env['NETWORK_FAILURE_RATE'] = str(self.crash_test_config.get("failure_rate", "0.5"))
+                container_env['NOISY_ERROR_MODE'] = str(self.crash_test_config.get("error_mode", "4xx_errors"))
+                container_env['NOISY_MODE'] = str(self.crash_test_config.get("noisy_mode", "both"))
+                # Add allowed domains
+                if "allowed_domains" in self.crash_test_config:
+                    container_env['ALLOWED_DOMAINS'] = ",".join(self.crash_test_config["allowed_domains"])
+                else:
+                    default_allowed = [
+                        "api.openai.com", "api.anthropic.com", 
+                        "generativelanguage.googleapis.com",
+                        "bedrock-runtime.us-east-1.amazonaws.com",
+                        "api.groq.com", "api.deepseek.com", "api.x.ai",
+                        "api.wandb.ai", "wandb.ai", "github.com"
+                    ]
+                    container_env['ALLOWED_DOMAINS'] = ",".join(default_allowed)
+                # Add debug flag if specified
+                if self.crash_test_config.get("debug", False):
+                    container_env['NOISY_DEBUG'] = "1"
+            
+            # Add all necessary environment variables from .env file to container
+            # This ensures API keys (like WANDB_API_KEY) are available in the container
+            dotenv_vars = dotenv_values(".env")
+            for key, value in dotenv_vars.items():
+                if value is not None:  # Only add non-None values
+                    container_env[key] = value
+            
             # create container from image and mount temp dir
             container = self.docker_client.containers.run(
                 image=image_name,
                 name=container_id,
                 detach=True,
                 command=["tail", "-f", "/dev/null"],  # Keep container running
+                environment=container_env,
             )
             
             # Add container to active list
@@ -275,7 +309,9 @@ class DockerRunner:
                 verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
             
             # create env
+            # IMPORTANT: Unset LD_PRELOAD for conda/pip operations - they need real network access!
             create_env_cmd = (
+                "unset LD_PRELOAD && "
                 "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
                 "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && "
                 "conda create -y -n agent_env python=3.12"
@@ -286,15 +322,38 @@ class DockerRunner:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await proc.communicate()
-            if self.verbose:
+            if self.verbose or proc.returncode != 0:
                 if stdout:
-                    verbose_logger.debug(f"Container {container_id}: {stdout.decode()}")
-            if stderr:
-                verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
+                    verbose_logger.debug(f"Container {container_id} [conda create]: {stdout.decode()}")
+                if stderr:
+                    verbose_logger.debug(f"Container {container_id} [conda create]: {stderr.decode()}")
+            
+            if proc.returncode != 0:
+                verbose_logger.warning(f"conda create failed with return code {proc.returncode}")
+            else:
+                verbose_logger.debug(f"conda environment 'agent_env' created successfully")
+
+            # Use full path to conda in Docker containers
+            conda_cmd = "/opt/conda/bin/conda"
+            
+            # Verify environment exists
+            check_env_cmd = f"unset LD_PRELOAD && {conda_cmd} info --envs | grep agent_env"
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "bash", "-c", check_env_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if stdout:
+                verbose_logger.debug(f"Container {container_id} [env check]: {stdout.decode()}")
+            if stderr and stderr.decode().strip():
+                verbose_logger.debug(f"Container {container_id} [env check stderr]: {stderr.decode()}")
                 
             # install requirements
+            # IMPORTANT: Unset LD_PRELOAD for pip - we need to download packages
+            pip_cmd = f"unset LD_PRELOAD && {conda_cmd} run --no-capture-output -n agent_env pip install -r /workspace/requirements.txt"
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", "conda run -n agent_env pip install -r /workspace/requirements.txt",
+                "docker", "exec", container_id, "bash", "-c", pip_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -306,36 +365,10 @@ class DockerRunner:
                 verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
             
             # Get current environment variables
+            # Note: For crash-test mode, environment variables are already set in container_env
+            # so they're inherited by the container and don't need to be passed again
             env_vars = os.environ.copy()
-            
-            # Add crash-test environment variables if in crash-test mode
-            if self.crash_test:
-                env_vars.update({
-                    "NETWORK_FAILURE_RATE": str(self.crash_test_config.get("failure_rate", "0.5")),
-                    "NOISY_ERROR_MODE": str(self.crash_test_config.get("error_mode", "4xx_errors")),
-                    "NOISY_MODE": str(self.crash_test_config.get("noisy_mode", "both")),
-                })
-                
-                # Add allowed domains if specified
-                if "allowed_domains" in self.crash_test_config:
-                    env_vars["ALLOWED_DOMAINS"] = ",".join(self.crash_test_config["allowed_domains"])
-                else:
-                    # Use default allowed domains (AI API providers)
-                    default_allowed = [
-                        "api.openai.com",
-                        "api.anthropic.com", 
-                        "generativelanguage.googleapis.com",
-                        "bedrock-runtime.us-east-1.amazonaws.com",
-                        "api.groq.com",
-                        "api.deepseek.com",
-                        "api.x.ai"
-                    ]
-                    env_vars["ALLOWED_DOMAINS"] = ",".join(default_allowed)
-                
-                # Add debug flag if specified
-                if self.crash_test_config.get("debug", False):
-                    env_vars["NOISY_DEBUG"] = "1"
-            
+                        
             # run setup script if it exists
             if self.benchmark and self.benchmark.setup_script:
                 print(f"Running setup script: {self.benchmark.setup_script}")
@@ -355,8 +388,9 @@ class DockerRunner:
                         verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")
                     
                     # run setup script and wait for it to complete
+                    # IMPORTANT: Unset LD_PRELOAD during setup too!
                     proc = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_id, "bash", "/workspace/setup_script.sh",
+                        "docker", "exec", container_id, "bash", "-c", "unset LD_PRELOAD && bash /workspace/setup_script.sh",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
@@ -368,8 +402,10 @@ class DockerRunner:
                         verbose_logger.debug(f"Container {container_id}: {stderr.decode()}")   
                         
             # install weave
+            # IMPORTANT: Unset LD_PRELOAD for weave install too!
+            weave_cmd = f"unset LD_PRELOAD && {conda_cmd} run --no-capture-output -n agent_env pip install weave==0.51.41 'gql<4'"
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", "conda run -n agent_env pip install weave==0.51.41 'gql<4'",
+                "docker", "exec", container_id, "bash", "-c", weave_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -406,14 +442,29 @@ class DockerRunner:
             ]
             filtered_env_vars = {k: v for k, v in env_vars.items() if k not in problematic_vars}
 
-            env_vars_str = " ".join([f"{k}={v}" for k, v in filtered_env_vars.items()])
+            # Properly quote environment variable values to handle special characters
+            env_vars_str = " ".join([f"{k}={shlex.quote(str(v))}" for k, v in filtered_env_vars.items()])
             print(f"Running script with env: {env_vars_str}")
             
-            # Use full path to conda in Docker containers
-            conda_cmd = "/opt/conda/bin/conda"
+            # If in crash-test mode, we need to pass LD_PRELOAD to conda run
+            # The issue is that conda run doesn't pass LD_PRELOAD to the Python subprocess
+            # So we need to explicitly set it in the bash environment before conda run
+            if self.crash_test:
+                # Export all environment variables in the bash session
+                # This ensures they're available when Python starts via conda run
+                export_cmds = " && ".join([
+                    "export LD_PRELOAD=/utils/libnoisy.so",
+                    f"export NETWORK_FAILURE_RATE={self.crash_test_config.get('failure_rate', '1.0')}",
+                    f"export NOISY_ERROR_MODE={self.crash_test_config.get('error_mode', '4xx_errors')}",
+                    f"export NOISY_MODE={self.crash_test_config.get('noisy_mode', 'both')}",
+                    f"export ALLOWED_DOMAINS='{container_env.get('ALLOWED_DOMAINS', '')}'"
+                ])
+                bash_cmd = f"{export_cmds} && echo '[CRASH-TEST DEBUG] Environment variables:' && env | grep -E '(LD_PRELOAD|NETWORK_FAILURE_RATE|NOISY_ERROR_MODE|NOISY_MODE|ALLOWED_DOMAINS)' && {conda_cmd} run --no-capture-output -n agent_env python run_agent.py"
+            else:
+                bash_cmd = f"{env_vars_str} {conda_cmd} run -n agent_env python run_agent.py"
 
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "bash", "-c", f"{env_vars_str} {conda_cmd} run -n agent_env python run_agent.py",
+                "docker", "exec", container_id, "bash", "-c", bash_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -494,10 +545,21 @@ class DockerRunner:
 import os
 import json
 import importlib.util
-import weave
 import traceback
+import weave
 
 try:
+    # Debug: Print environment variables for crash-test mode (always check, useful for debugging)
+    if os.environ.get('NETWORK_FAILURE_RATE'):
+        print("=" * 60)
+        print("CRASH-TEST DEBUG: Environment variables in Python")
+        print(f"NETWORK_FAILURE_RATE: {{os.environ.get('NETWORK_FAILURE_RATE', 'NOT SET')}}")
+        print(f"NOISY_ERROR_MODE: {{os.environ.get('NOISY_ERROR_MODE', 'NOT SET')}}")
+        print(f"NOISY_MODE: {{os.environ.get('NOISY_MODE', 'NOT SET')}}")
+        print(f"ALLOWED_DOMAINS: {{os.environ.get('ALLOWED_DOMAINS', 'NOT SET')}}")
+        print(f"LD_PRELOAD: {{os.environ.get('LD_PRELOAD', 'NOT SET')}}")
+        print("=" * 60)
+    
     # Initialize weave
     weave.init("{run_id}")
     
